@@ -2,10 +2,12 @@
 #include "node_buffer.h"
 #include "v8.h"
 #include "nan.h"
+#include "errno.h"
 
 #include <sys/mman.h>
 #include <unistd.h>
 
+namespace node {
 namespace node_mmap {
 
 using v8::Handle;
@@ -27,7 +29,7 @@ static void DontFree(char* data, void* hint) {
 
 
 NAN_METHOD(Alloc) {
-  NanEscapableScope();
+  NanScope();
 
   int len = args[0]->Uint32Value();
   int prot = args[1]->Uint32Value();
@@ -39,7 +41,7 @@ NAN_METHOD(Alloc) {
   if (res == MAP_FAILED)
     return NanThrowError("mmap() call failed");
 
-  return NanEscapeScope(NanNewBufferHandle(
+  NanReturnValue(NanNewBufferHandle(
         reinterpret_cast<char*>(res),
         len,
         FreeCallback,
@@ -48,7 +50,7 @@ NAN_METHOD(Alloc) {
 
 
 NAN_METHOD(AlignedAlloc) {
-  NanEscapableScope();
+  NanScope();
 
   int len = args[0]->Uint32Value();
   int prot = args[1]->Uint32Value();
@@ -68,9 +70,8 @@ NAN_METHOD(AlignedAlloc) {
         reinterpret_cast<void*>(static_cast<intptr_t>(len + align)));
 
   intptr_t ptr = reinterpret_cast<intptr_t>(res);
-  if (ptr % align == 0) {
-    return NanEscapeScope(buf);
-  }
+  if (ptr % align == 0)
+    NanReturnValue(buf);
 
   // Slice the buffer if it was unaligned
   int slice_off = align - (ptr % align);
@@ -81,28 +82,76 @@ NAN_METHOD(AlignedAlloc) {
       NULL);
 
   slice->SetHiddenValue(NanNew("alignParent"), buf);
-  return NanEscapeScope(slice);
+  NanReturnValue(slice);
+}
+
+
+NAN_METHOD(Sync) {
+  NanScope();
+  char* data = node::Buffer::Data(args[0]->ToObject());
+  size_t length =  node::Buffer::Length(args[0]->ToObject());
+
+  if (args.Length() > 1) {
+    // optional argument: offset
+    const size_t offset = args[1]->Uint32Value();
+    if (length <= offset) {
+      return NanThrowRangeError("Offset out of bounds");
+    } else if (offset > 0 && (offset % getpagesize())) {
+      return NanThrowRangeError("Offset must be a multiple of page size");
+    }
+
+    data += offset;
+    length -= offset;
+  }
+
+  if (args.Length() > 2) {
+    // optional argument: length
+    const size_t range = args[2]->Uint32Value();
+    if (range < length) {
+      length = range;
+    }
+  }
+
+  int flags;
+  if (args.Length() > 3) {
+    // optional argument: flags
+    flags = args[3]->Uint32Value();
+  } else {
+    flags = MS_SYNC;
+  }
+
+  if (msync(data, length, flags) == 0) {
+    NanReturnValue(NanTrue());
+  } else {
+    return NanThrowError(strerror(errno), errno);
+  }
 }
 
 
 static void Init(Handle<Object> target) {
   NODE_SET_METHOD(target, "alloc", Alloc);
   NODE_SET_METHOD(target, "alignedAlloc", AlignedAlloc);
+  NODE_SET_METHOD(target, "sync", Sync);
 
-  target->Set(NanNew("PROT_NONE"), NanNew<Number, uint32_t>(PROT_NONE));
-  target->Set(NanNew("PROT_READ"), NanNew<Number, uint32_t>(PROT_READ));
-  target->Set(NanNew("PROT_WRITE"), NanNew<Number, uint32_t>(PROT_WRITE));
-  target->Set(NanNew("PROT_EXEC"), NanNew<Number, uint32_t>(PROT_EXEC));
+  target->Set(NanNew("PROT_NONE"), NanNew<Number>(PROT_NONE));
+  target->Set(NanNew("PROT_READ"), NanNew<Number>(PROT_READ));
+  target->Set(NanNew("PROT_WRITE"), NanNew<Number>(PROT_WRITE));
+  target->Set(NanNew("PROT_EXEC"), NanNew<Number>(PROT_EXEC));
 
-  target->Set(NanNew("MAP_ANON"), NanNew<Number, uint32_t>(MAP_ANON));
-  target->Set(NanNew("MAP_PRIVATE"), NanNew<Number, uint32_t>(MAP_PRIVATE));
-  target->Set(NanNew("MAP_SHARED"), NanNew<Number, uint32_t>(MAP_SHARED));
-  target->Set(NanNew("MAP_FIXED"), NanNew<Number, uint32_t>(MAP_FIXED));
+  target->Set(NanNew("MAP_ANON"), NanNew<Number>(MAP_ANON));
+  target->Set(NanNew("MAP_PRIVATE"), NanNew<Number>(MAP_PRIVATE));
+  target->Set(NanNew("MAP_SHARED"), NanNew<Number>(MAP_SHARED));
+  target->Set(NanNew("MAP_FIXED"), NanNew<Number>(MAP_FIXED));
 
-  target->Set(NanNew("PAGE_SIZE"), NanNew<Number, uint32_t>(getpagesize()));
+  target->Set(NanNew("MS_ASYNC"), NanNew<Number>(MS_ASYNC));
+  target->Set(NanNew("MS_SYNC"), NanNew<Number>(MS_SYNC));
+  target->Set(NanNew("MS_INVALIDATE"), NanNew<Number>(MS_INVALIDATE));
+
+  target->Set(NanNew("PAGE_SIZE"), NanNew<Number>(getpagesize()));
 }
 
 
-NODE_MODULE(mmap, Init);
-
 }  // namespace node_mmap
+}  // namespace node
+
+NODE_MODULE(mmap, node::node_mmap::Init);
